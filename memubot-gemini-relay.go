@@ -38,7 +38,16 @@ type GenericRequest struct {
 }
 
 type GooglePart struct {
-	Text string `json:"text"`
+	Text             string              `json:"text,omitempty"`
+	FunctionCall     *geminiFunctionCall `json:"functionCall,omitempty"`
+	ThoughtSignature string              `json:"thoughtSignature,omitempty"`
+}
+
+type geminiFunctionCall struct {
+	Name    string         `json:"name"`
+	Args    map[string]any `json:"args"`
+	ID      string         `json:"id,omitempty"`
+	Thought bool           `json:"thought,omitempty"`
 }
 
 type GoogleContent struct {
@@ -53,10 +62,10 @@ type GoogleRequest struct {
 type GoogleResponse struct {
 	Candidates []struct {
 		Content struct {
-			Parts []struct {
-				Text string `json:"text"`
-			} `json:"parts"`
+			Parts []GooglePart `json:"parts"`
 		} `json:"content"`
+		FinishReason  string `json:"finishReason"`
+		FinishMessage string `json:"finishMessage"`
 	} `json:"candidates"`
 }
 
@@ -188,47 +197,74 @@ func handleProxy(w http.ResponseWriter, r *http.Request) {
 	var gResp GoogleResponse
 	json.Unmarshal(gBody, &gResp)
 
-	if len(gResp.Candidates) > 0 && len(gResp.Candidates[0].Content.Parts) > 0 {
-		content := gResp.Candidates[0].Content.Parts[0].Text
-		var res interface{}
-
-		if strings.Contains(path, "/messages") {
-			res = map[string]interface{}{
-				"id":    fmt.Sprintf("ant-%d", time.Now().Unix()),
-				"type":  "message",
-				"role":  "assistant",
-				"model": genReq.Model,
-				"content": []map[string]interface{}{
-					{"type": "text", "text": content},
-				},
-				"stop_reason": "end_turn",
+	if len(gResp.Candidates) > 0 {
+		candidate := gResp.Candidates[0]
+		content := ""
+		for _, part := range candidate.Content.Parts {
+			if part.Text != "" {
+				content += part.Text
 			}
-		} else {
-			res = map[string]interface{}{
-				"id":      fmt.Sprintf("chatcmpl-%d", time.Now().Unix()),
-				"object":  "chat.completion",
-				"created": time.Now().Unix(),
-				"model":   genReq.Model,
-				"choices": []map[string]interface{}{
-					{
-						"index": 0,
-						"message": map[string]string{
-							"role":    "assistant",
-							"content": content,
-						},
-						"finish_reason": "stop",
+		}
+
+		// 如果内容为空且发生了 MALFORMED_FUNCTION_CALL，从 FinishMessage 中提取
+		if content == "" && candidate.FinishReason == "MALFORMED_FUNCTION_CALL" && candidate.FinishMessage != "" {
+			content = candidate.FinishMessage
+			// 尝试移除 "Malformed function call: " 前缀
+			content = strings.TrimPrefix(content, "Malformed function call: ")
+			// 尝试移除可能存在的 hallucinated tool call (例如 call:xxx{...} 或 call:xxx(...))
+			if idx := strings.Index(content, "})"); idx != -1 {
+				content = content[idx+2:]
+			} else if idx := strings.Index(content, "}"); idx != -1 {
+				content = content[idx+1:]
+			} else if idx := strings.Index(content, ")"); idx != -1 {
+				content = content[idx+1:]
+			}
+			content = strings.TrimSpace(content)
+		}
+
+		if content != "" {
+			var res interface{}
+			if strings.Contains(path, "/messages") {
+				res = map[string]interface{}{
+					"id":    fmt.Sprintf("ant-%d", time.Now().Unix()),
+					"type":  "message",
+					"role":  "assistant",
+					"model": genReq.Model,
+					"content": []map[string]interface{}{
+						{"type": "text", "text": content},
 					},
-				},
+					"stop_reason": "end_turn",
+				}
+			} else {
+				res = map[string]interface{}{
+					"id":      fmt.Sprintf("chatcmpl-%d", time.Now().Unix()),
+					"object":  "chat.completion",
+					"created": time.Now().Unix(),
+					"model":   genReq.Model,
+					"choices": []map[string]interface{}{
+						{
+							"index": 0,
+							"message": map[string]string{
+								"role":    "assistant",
+								"content": content,
+							},
+							"finish_reason": "stop",
+						},
+					},
+				}
 			}
-		}
 
-		if debugMode {
-			log.Printf("[DEBUG] 成功响应 | 耗时: %v", time.Since(startTime))
+			if debugMode {
+				log.Printf("[DEBUG] 成功响应 | 耗时: %v", time.Since(startTime))
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(res)
+		} else {
+			fmt.Printf("[ERR] Gemini 未返回有效内容 (可能是被安全策略拦截)。原始响应: %s\n", string(gBody))
+			http.Error(w, "Gemini returned no content (possibly blocked by safety filters)", 500)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(res)
 	} else {
-		fmt.Printf("[ERR] Gemini 未返回有效内容 (可能是被安全策略拦截)。原始响应: %s\n", string(gBody))
-		http.Error(w, "Gemini returned no content (possibly blocked by safety filters)", 500)
+		fmt.Printf("[ERR] Gemini 未返回 Candidate。原始响应: %s\n", string(gBody))
+		http.Error(w, "Gemini returned no candidates", 500)
 	}
 }
