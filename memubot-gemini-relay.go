@@ -206,17 +206,18 @@ func handleProxy(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// 如果内容为空且发生了 MALFORMED_FUNCTION_CALL，从 FinishMessage 中提取
+		// 核心修复逻辑：针对 Gemini 3.0/Preview 的 MALFORMED_FUNCTION_CALL
+		// 参考 lingti-bot: 即使 content.parts 为空，有效文本也可能在 finishMessage 中
 		if content == "" && candidate.FinishReason == "MALFORMED_FUNCTION_CALL" && candidate.FinishMessage != "" {
 			content = candidate.FinishMessage
-			// 尝试移除 "Malformed function call: " 前缀
 			content = strings.TrimPrefix(content, "Malformed function call: ")
-			// 尝试移除可能存在的 hallucinated tool call (例如 call:xxx{...} 或 call:xxx(...))
-			if idx := strings.Index(content, "})"); idx != -1 {
+			// 移除幻觉代码，保留真正的人类可读文本
+			// 这种报错通常长这样: "Malformed function call: call:macos_show{...} 这里的真正文本"
+			if idx := strings.LastIndex(content, "})"); idx != -1 {
 				content = content[idx+2:]
-			} else if idx := strings.Index(content, "}"); idx != -1 {
+			} else if idx := strings.LastIndex(content, "}"); idx != -1 {
 				content = content[idx+1:]
-			} else if idx := strings.Index(content, ")"); idx != -1 {
+			} else if idx := strings.LastIndex(content, ")"); idx != -1 {
 				content = content[idx+1:]
 			}
 			content = strings.TrimSpace(content)
@@ -255,13 +256,16 @@ func handleProxy(w http.ResponseWriter, r *http.Request) {
 			}
 
 			if debugMode {
-				log.Printf("[DEBUG] 成功响应 | 耗时: %v", time.Since(startTime))
+				log.Printf("[DEBUG] 成功响应 | 长度: %d | 耗时: %v", len(content), time.Since(startTime))
 			}
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(res)
+			// 使用 NewEncoder 确保流式写入且 JSON 完整闭合
+			enc := json.NewEncoder(w)
+			enc.SetEscapeHTML(false)
+			enc.Encode(res)
 		} else {
-			fmt.Printf("[ERR] Gemini 未返回有效内容 (可能是被安全策略拦截)。原始响应: %s\n", string(gBody))
-			http.Error(w, "Gemini returned no content (possibly blocked by safety filters)", 500)
+			fmt.Printf("[ERR] Gemini 未返回有效内容。原始响应: %s\n", string(gBody))
+			http.Error(w, "Gemini returned no content", 500)
 		}
 	} else {
 		fmt.Printf("[ERR] Gemini 未返回 Candidate。原始响应: %s\n", string(gBody))
