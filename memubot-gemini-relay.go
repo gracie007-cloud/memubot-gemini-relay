@@ -188,7 +188,7 @@ func handleProxy(w http.ResponseWriter, r *http.Request) {
 	var gResp GoogleResponse
 	json.Unmarshal(gBody, &gResp)
 
-	if len(gResp.Candidates) > 0 {
+	if len(gResp.Candidates) > 0 && len(gResp.Candidates[0].Content.Parts) > 0 {
 		content := gResp.Candidates[0].Content.Parts[0].Text
 		var res interface{}
 
@@ -228,7 +228,7 @@ func handleProxy(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(res)
 	} else {
-		fmt.Println("[ERR] Gemini 未返回有效内容")
-		http.Error(w, "No candidates", 500)
+		fmt.Printf("[ERR] Gemini 未返回有效内容 (可能是被安全策略拦截)。原始响应: %s\n", string(gBody))
+		http.Error(w, "Gemini returned no content (possibly blocked by safety filters)", 500)
 	}
 }
